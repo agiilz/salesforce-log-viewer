@@ -1,48 +1,159 @@
 import * as vscode from 'vscode';
 import { Connection } from 'jsforce';
 import { LogDataProvider } from './logDataProvider';
+import { DeveloperLog } from './developerLog';
+import * as fs from 'fs';
+import * as path from 'path';
 
 let logDataProvider: LogDataProvider | undefined;
 let extensionContext: vscode.ExtensionContext;
+let currentOrgUsername: string | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
     extensionContext = context;
     const config = vscode.workspace.getConfiguration('salesforceLogViewer');
 
+    try {
+        // Get initial org username
+        currentOrgUsername = vscode.workspace.getConfiguration('salesforce.sfdx-cli').get('defaultusername');
+
+        // Create the log data provider first
+        const logProvider = await getLogDataProvider();
+        
+        // Initial fetch of logs
+        await logProvider.refreshLogs(true);
+        console.log('Initial logs fetched:', logProvider.getGridData());
+
+        // Create and register the webview provider
+        const provider = new LogViewProvider(context.extensionUri, logProvider);
+        context.subscriptions.push(
+            vscode.window.registerWebviewViewProvider('salesforceLogsView', provider)
+        );
+
     // Register commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('salesforce-log-viewer.refreshLogs', refreshLogs),
+            vscode.commands.registerCommand('salesforce-log-viewer.refreshLogs', async () => {
+                console.log('Refresh command triggered');
+                await refreshLogs();
+                provider.updateView();
+            }),
         vscode.commands.registerCommand('salesforce-log-viewer.openLog', openLog),
         vscode.commands.registerCommand('salesforce-log-viewer.toggleCurrentUserOnly', setLogVisibility),
         vscode.commands.registerCommand('salesforce-log-viewer.deleteAllLogs', deleteAllLogs),
         vscode.commands.registerCommand('salesforce-log-viewer.toggleAutoRefresh', toggleAutoRefresh),
         vscode.commands.registerCommand('salesforce-log-viewer.showOptions', showOptions),
-        vscode.commands.registerCommand('salesforce-log-viewer.showSearchBox', showSearchBox)
-    );
+            vscode.commands.registerCommand('salesforce-log-viewer.showSearchBox', showSearchBox),
+            vscode.commands.registerCommand('salesforce-log-viewer.clearSearch', clearSearch)
+        );
 
-    try {
-        // Create tree view
-        const treeView = vscode.window.createTreeView('salesforceLogsView', {
-            treeDataProvider: await getLogDataProvider(),
-            showCollapseAll: true
+        // Listen for org changes
+        context.subscriptions.push(
+            vscode.workspace.onDidChangeConfiguration(async (e) => {
+                if (e.affectsConfiguration('salesforce.sfdx-cli.defaultusername')) {
+                    const newUsername = vscode.workspace.getConfiguration('salesforce.sfdx-cli').get('defaultusername');
+                    if (newUsername !== currentOrgUsername) {
+                        currentOrgUsername = newUsername as string;
+                        await refreshConnection();
+                        provider.updateView();
+                    }
+                }
+            })
+        );
+
+        // Subscribe to data changes
+        logProvider.onDidChangeData(({ data, isAutoRefresh }) => {
+            console.log('Data changed event triggered');
+            provider.updateView(data, isAutoRefresh);
         });
 
-        context.subscriptions.push(treeView);
-
-        // Reveal the Salesforce Logs view in the activity bar
-        const provider = await getLogDataProvider();
-        const children = await provider.getChildren();
-        if (children && children.length > 0) {
-            try {
-                await treeView.reveal(children[0], { focus: true, expand: false });
-            } catch (revealError) {
-                // If reveal fails, just log it and continue
-                console.log('Failed to reveal tree view item:', revealError);
-            }
-        }
     } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error occurred';
+        console.error('Activation error:', error);
         vscode.window.showErrorMessage(`Failed to initialize Salesforce Log Viewer: ${errorMessage}`);
+    }
+}
+
+class LogViewProvider implements vscode.WebviewViewProvider {
+    private _view?: vscode.WebviewView;
+
+    constructor(
+        private readonly _extensionUri: vscode.Uri,
+        private readonly _logDataProvider: LogDataProvider
+    ) {
+        // Subscribe to data changes
+        this._logDataProvider.onDidChangeData(({ data, isAutoRefresh }) => {
+            this.updateView(data, isAutoRefresh);
+        });
+    }
+
+    private postMessageToWebview(message: any) {
+        if (this._view) {
+            this._view.webview.postMessage(message);
+        }
+    }
+
+    public updateView(data?: any[], isAutoRefresh: boolean = false) {
+        const gridData = data || this._logDataProvider.getGridData();
+        this.postMessageToWebview({ 
+            type: 'updateData',
+            data: gridData,
+            isAutoRefresh: isAutoRefresh
+        });
+    }
+
+    public resolveWebviewView(
+        webviewView: vscode.WebviewView,
+        context: vscode.WebviewViewResolveContext,
+        _token: vscode.CancellationToken,
+    ) {
+        this._view = webviewView;
+
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [
+                this._extensionUri
+            ]
+        };
+
+        webviewView.webview.html = this._getHtmlForWebview();
+
+        webviewView.webview.onDidReceiveMessage(async (message) => {
+            switch (message.command) {
+                case 'ready':
+                    // Send initial data
+                    const initialData = this._logDataProvider.getGridData();
+                    this.updateView(initialData, false);
+                    break;
+                case 'openLog':
+                    await openLog({ id: message.log.id });
+                    break;
+            }
+        });
+    }
+
+    private _getHtmlForWebview() {
+        const columns = this._logDataProvider.columns;
+        const templatePath = path.join(this._extensionUri.fsPath, 'src', 'templates', 'logViewer.html');
+        let template = fs.readFileSync(templatePath, 'utf8');
+
+        // Replace the column headers placeholder
+        const columnHeaders = columns.map(col => 
+            `<div class="grid-cell" data-field="${col.field}" style="width: ${col.width}px">${col.label}</div>`
+        ).join('');
+        template = template.replace('<!--COLUMN_HEADERS-->', columnHeaders);
+
+        // Replace the column cells placeholder
+        const columnCells = columns.map(col => `
+            const ${col.field}Cell = document.createElement('div');
+            ${col.field}Cell.className = 'grid-cell';
+            ${col.field}Cell.dataset.field = '${col.field}';
+            ${col.field}Cell.style.width = '${col.width}px';
+            ${col.field}Cell.textContent = row.${col.field} || '';
+            rowDiv.appendChild(${col.field}Cell);
+        `).join('');
+        template = template.replace('<!--COLUMN_CELLS-->', columnCells);
+
+        return template;
     }
 }
 
@@ -51,6 +162,14 @@ export function deactivate() {
         logDataProvider.dispose();
         logDataProvider = undefined;
     }
+}
+
+async function refreshConnection() {
+    if (logDataProvider) {
+        logDataProvider.dispose();
+        logDataProvider = undefined;
+    }
+    await refreshLogs();
 }
 
 async function getLogDataProvider(): Promise<LogDataProvider> {
@@ -73,47 +192,55 @@ async function getLogDataProvider(): Promise<LogDataProvider> {
 
 async function createConnection(): Promise<Connection> {
     try {
-        // Get org list from SFDX
-        const { stdout: orgListOutput } = await executeCommand('sfdx force:org:list --json');
-        const orgList = JSON.parse(orgListOutput);
+        // Get the Salesforce extension's configuration
+        const sfConfig = vscode.workspace.getConfiguration('salesforcedx-vscode-core');
         
-        if (!orgList.result || !orgList.result.nonScratchOrgs || orgList.result.nonScratchOrgs.length === 0) {
-            throw new Error('No connected orgs found. Please authenticate with SFDX first using: sfdx force:auth:web:login');
+        // Try to get the connection info from the workspace state
+        const workspaceState = extensionContext.workspaceState;
+        const connectionInfo = workspaceState.get('sfdx:connection_info');
+
+        if (!connectionInfo) {
+            // If no connection info in workspace state, try to get it from the SFDX CLI
+            const { exec } = require('child_process');
+            const execPromise = (cmd: string) => new Promise<string>((resolve, reject) => {
+                exec(cmd, (error: Error | null, stdout: string) => {
+                    if (error) reject(error);
+                    else resolve(stdout);
+                });
+            });
+
+            // Get the default org username from VS Code settings
+            const defaultUsername = sfConfig.get('defaultUsernameOrAlias') || 'DevOrg';
+            
+            try {
+                // Get org details using SFDX
+                const orgDetailsStr = await execPromise(`sfdx org:display -u "${defaultUsername}" --json`);
+                const orgDetails = JSON.parse(orgDetailsStr);
+
+                if (!orgDetails.result || !orgDetails.result.accessToken || !orgDetails.result.instanceUrl) {
+                    throw new Error(`Unable to get connection details for org "${defaultUsername}". Please ensure you are authenticated.`);
+                }
+
+                // Store the connection info in workspace state for future use
+                const connInfo = {
+                    instanceUrl: orgDetails.result.instanceUrl,
+                    accessToken: orgDetails.result.accessToken
+                };
+                
+                await workspaceState.update('sfdx:connection_info', connInfo);
+                return new Connection(connInfo);
+            } catch (cmdError: any) {
+                throw new Error(`Failed to get org details: ${cmdError.message}`);
+            }
         }
 
-        // Use the first connected org
-        const org = orgList.result.nonScratchOrgs[0];
-        
-        // Get org details
-        const { stdout: orgDetailsOutput } = await executeCommand(`sfdx force:org:display --json -u ${org.username}`);
-        const orgDetails = JSON.parse(orgDetailsOutput);
-
-        if (!orgDetails.result) {
-            throw new Error('Failed to get org details. Please make sure you are connected to your org.');
-        }
-
-        return new Connection({
-            instanceUrl: orgDetails.result.instanceUrl,
-            accessToken: orgDetails.result.accessToken
-        });
+        // Use the stored connection info
+        return new Connection(connectionInfo);
     } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error occurred';
         vscode.window.showErrorMessage(`Failed to connect to Salesforce: ${errorMessage}`);
         throw error;
     }
-}
-
-async function executeCommand(command: string): Promise<{ stdout: string, stderr: string }> {
-    const { exec } = require('child_process');
-    return new Promise((resolve, reject) => {
-        exec(command, (error: Error | null, stdout: string, stderr: string) => {
-            if (error) {
-                reject(error);
-            } else {
-                resolve({ stdout, stderr });
-            }
-        });
-    });
 }
 
 async function refreshLogs() {
@@ -127,9 +254,29 @@ async function refreshLogs() {
     }
 }
 
-async function openLog(log: any) {
+async function openLog(data: { id: string }) {
     try {
         const provider = await getLogDataProvider();
+        // Query the full log details with type assertion
+        const result = await provider.connection.tooling.retrieve('ApexLog', data.id) as any;
+        if (!result) {
+            throw new Error(`Log with ID ${data.id} not found`);
+        }
+
+        // Create a DeveloperLog instance with the retrieved data
+        const log = new DeveloperLog({
+            Id: result.Id,
+            LogUser: { Name: result.LogUser?.Name || 'Unknown' },
+            Operation: result.Operation || '',
+            StartTime: result.StartTime || new Date().toISOString(),
+            Status: result.Status || '',
+            LogLength: result.LogLength || 0,
+            DurationMilliseconds: result.DurationMilliseconds || 0,
+            Application: result.Application || '',
+            Location: result.Location || '',
+            Request: result.Request || ''
+        }, provider.connection);
+
         await provider.logViewer.showLog(log);
     } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error occurred';
@@ -234,40 +381,35 @@ async function toggleAutoRefresh() {
     const provider = await getLogDataProvider();
     const currentSetting = provider.getAutoRefreshSetting();
 
-    // Update the command title to reflect current state
-    await vscode.commands.executeCommand('setContext', 'salesforceLogViewer.autoRefreshEnabled', currentSetting);
-
     const items: vscode.QuickPickItem[] = [
         {
-            label: "Auto-refresh enabled",
+            label: `${currentSetting ? '✓' : '  '} Auto-refresh enabled`,
             description: "Automatically refresh logs at the configured interval",
             picked: currentSetting
         },
         {
-            label: "Auto-refresh disabled",
+            label: `${!currentSetting ? '✓' : '  '} Auto-refresh disabled`,
             description: "Manually refresh logs using the refresh button",
             picked: !currentSetting
         }
     ];
 
     const selection = await vscode.window.showQuickPick(items, {
-        placeHolder: `Auto-refresh is currently ${currentSetting ? 'enabled' : 'disabled'}. Select new state:`
+        placeHolder: "Select auto-refresh setting"
     });
 
     if (!selection) {
-        return;
+        return; // User cancelled
     }
 
-    const wantsAutoRefresh = selection.label === "Auto-refresh enabled";
+    const wantsAutoRefresh = selection.label.includes("enabled");
 
+    // Only call the update method if the selection is different from the current setting
     if (wantsAutoRefresh !== currentSetting) {
         try {
             await provider.setAutoRefresh(wantsAutoRefresh);
-            const status = wantsAutoRefresh ? 'enabled' : 'disabled';
+            const status = wantsAutoRefresh ? 'Enabled' : 'Disabled';
             vscode.window.showInformationMessage(`Auto-refresh ${status}`);
-            
-            // Update the command title after changing the state
-            await vscode.commands.executeCommand('setContext', 'salesforceLogViewer.autoRefreshEnabled', wantsAutoRefresh);
         } catch (error: any) {
             const errorMessage = error?.message || 'Unknown error occurred';
             vscode.window.showErrorMessage(`Failed to set auto-refresh: ${errorMessage}`);
@@ -329,16 +471,31 @@ async function showOptions() {
 async function showSearchBox() {
     try {
         const provider = await getLogDataProvider();
+        const currentFilter = provider.getSearchFilter();
+        
         const searchText = await vscode.window.showInputBox({
             placeHolder: 'Filter logs by operation or username...',
-            prompt: 'Enter text to filter logs'
+            prompt: 'Enter text to filter logs',
+            value: currentFilter,
+            ignoreFocusOut: true
         });
         
-        if (searchText !== undefined) { // User didn't cancel
+        if (searchText !== undefined) {
             provider.setSearchFilter(searchText);
         }
     } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error occurred';
         vscode.window.showErrorMessage(`Failed to filter logs: ${errorMessage}`);
+    }
+}
+
+async function clearSearch() {
+    try {
+        const provider = await getLogDataProvider();
+        provider.clearSearch();
+        vscode.window.showInformationMessage('Search filter cleared');
+    } catch (error: any) {
+        const errorMessage = error?.message || 'Unknown error occurred';
+        vscode.window.showErrorMessage(`Failed to clear search: ${errorMessage}`);
     }
 }

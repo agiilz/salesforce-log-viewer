@@ -3,9 +3,14 @@ import { Connection } from 'jsforce';
 import { DeveloperLog, DeveloperLogRecord } from './developerLog';
 import { LogViewer } from './logViewer';
 
-export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, vscode.Disposable {
-    private _onDidChangeTreeData: vscode.EventEmitter<DeveloperLog | undefined> = new vscode.EventEmitter<DeveloperLog | undefined>();
-    readonly onDidChangeTreeData: vscode.Event<DeveloperLog | undefined> = this._onDidChangeTreeData.event;
+export interface LogDataChangeEvent {
+    data: any[];
+    isAutoRefresh: boolean;
+}
+
+export class LogDataProvider implements vscode.Disposable {
+    private _onDidChangeData = new vscode.EventEmitter<LogDataChangeEvent>();
+    readonly onDidChangeData = this._onDidChangeData.event;
 
     private logs: DeveloperLog[] = [];
     private filteredLogs: DeveloperLog[] = [];
@@ -17,14 +22,16 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
     private currentUserId?: string;
     public readonly logViewer: LogViewer;
     private context: vscode.ExtensionContext;
-    private isCollapsed: boolean = false;
 
-    // Define widths at class level for access in multiple methods
-    private readonly userWidth = 20;
-    private readonly timeWidth = 10;
-    private readonly statusWidth = 10;
-    private readonly sizeWidth = 8;
-    private readonly targetDataOperationLength = 50; // For data rows
+    // Column definitions for the data grid
+    readonly columns = [
+        { label: 'User', field: 'user', width: 150 },
+        { label: 'Time', field: 'time', width: 100 },
+        { label: 'Status', field: 'status', width: 80 },
+        { label: 'Size', field: 'size', width: 80 },
+        { label: 'Operation', field: 'operation', width: 400 },
+        { label: 'Duration', field: 'duration', width: 100 }
+    ];
 
     constructor(
         context: vscode.ExtensionContext,
@@ -35,6 +42,7 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
             currentUserOnly: boolean;
         }
     ) {
+        console.log('Initializing LogDataProvider');
         this.context = context;
         this.logViewer = new LogViewer(vscode.workspace.rootPath);
         this.logs = [];
@@ -44,8 +52,10 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
 
     private async initialize() {
         try {
+            console.log('Starting LogDataProvider initialization');
             if (this.config.currentUserOnly) {
                 this.currentUserId = await this.getCurrentUserId();
+                console.log('Current user ID:', this.currentUserId);
             }
             
             // Initial load of logs
@@ -56,13 +66,14 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
                 this.startAutoRefresh();
             }
         } catch (error: any) {
+            console.error('LogDataProvider initialization error:', error);
             vscode.window.showErrorMessage(`Failed to initialize log viewer: ${error.message}`);
-            console.error('Initialization error:', error);
         }
     }
 
     dispose() {
         this.stopAutoRefresh();
+        this._onDidChangeData.dispose();
     }
 
     private startAutoRefresh() {
@@ -87,32 +98,38 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
         }
     }
 
+    private _notifyDataChange(isAutoRefresh: boolean = false) {
+        const gridData = this.getGridData();
+        this._onDidChangeData.fire({ data: gridData, isAutoRefresh });
+    }
+
     public async refreshLogs(isInitialLoad: boolean = false, isManualRefresh: boolean = false): Promise<void> {
         if (this.isRefreshing) {
             return;
         }
         this.isRefreshing = true;
+        console.log('Starting log refresh');
         try {
             const refreshDate = new Date();
             let query = 'SELECT Id, Application, DurationMilliseconds, LogLength, LogUser.Name, Operation, Request, StartTime, Status FROM ApexLog';
 
-            let hasWhereClause = false;
             if (this.config.currentUserOnly && this.currentUserId) {
                 query += ` WHERE LogUserId = '${this.currentUserId}'`;
-                hasWhereClause = true;
             }
 
             query += ' ORDER BY StartTime DESC LIMIT 100';
+            console.log('Executing query:', query);
 
             const result = await this.connection.tooling.query<DeveloperLogRecord>(query);
+            console.log('Query result:', result);
             this.lastRefresh = refreshDate; 
 
-            let updatedLogs: DeveloperLog[] = [];
             if (result.records && result.records.length > 0) {
                 const newLogs = result.records.map(record => new DeveloperLog(record, this.connection));
+                console.log('Processed new logs:', newLogs.length);
                 
                 if (isInitialLoad) {
-                    updatedLogs = newLogs;
+                    this.logs = newLogs;
                 } else {
                     const uniqueLogEntries = new Map<string, DeveloperLog>();
                     newLogs.forEach(log => uniqueLogEntries.set(log.id, log)); 
@@ -121,41 +138,100 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
                             uniqueLogEntries.set(log.id, log);
                         }
                     });
-                    updatedLogs = Array.from(uniqueLogEntries.values());
+                    this.logs = Array.from(uniqueLogEntries.values());
                 }
             } else {
-                updatedLogs = []; 
+                console.log('No logs found in query result');
+                this.logs = [];
             }
             
-            this.logs = updatedLogs
+            this.logs = this.logs
                 .filter(log => log.operation !== '<empty>')
                 .sort((a, b) => b.startTime.getTime() - a.startTime.getTime())
                 .slice(0, 100);
 
-            // Clear search filter on initial load or manual refresh
+            console.log('Final processed logs:', this.logs.length);
+
             if (isInitialLoad || isManualRefresh) {
                 this.searchText = '';
                 this.filteredLogs = [...this.logs];
             } else {
-                // Re-apply existing filter for auto-refresh
                 this._filterLogs();
             }
 
-            this._onDidChangeTreeData.fire(undefined);
+            // Notify with auto-refresh flag
+            this._notifyDataChange(!isInitialLoad && !isManualRefresh);
         } catch (error: any) {
+            console.error('Log refresh error:', error);
             vscode.window.showErrorMessage(`Failed to refresh logs: ${error.message}`);
-            console.error('Refresh error:', error);
         } finally {
             this.isRefreshing = false;
             this.scheduleRefresh(); 
         }
     }
     
-    private async getCurrentUserId(): Promise<string> {
-        const result = await this.connection.identity();
-        return result.user_id;
+    public getGridData(): any[] {
+        console.log('Getting grid data, filtered logs count:', this.filteredLogs.length);
+        return this.filteredLogs.map(log => {
+            // Create a clean object with only the necessary data
+            const cleanLog = {
+                id: log.id,
+                user: log.user,
+                time: new Date(log.startTime).toLocaleTimeString('en-US', {
+                    hour12: false,
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit'
+                }),
+                status: log.status,
+                size: `${(log.size / 1024).toFixed(1)}KB`,
+                operation: log.operation,
+                duration: `${log.durationMilliseconds}ms`,
+                // Include only the necessary properties for opening the log
+                logData: {
+                    id: log.id,
+                    startTime: log.startTime,
+                    size: log.size,
+                    status: log.status,
+                    operation: log.operation,
+                    user: log.user,
+                    durationMilliseconds: log.durationMilliseconds
+                }
+            };
+            return cleanLog;
+        });
     }
 
+    public setSearchFilter(text: string) {
+        this.searchText = text;
+        this._filterLogs();
+        this._notifyDataChange(false);
+    }
+
+    public clearSearch() {
+        this.searchText = '';
+        this._filterLogs();
+        this._notifyDataChange(false);
+    }
+
+    public getSearchFilter(): string {
+        return this.searchText;
+    }
+
+    private _filterLogs() {
+        if (!this.searchText) {
+            this.filteredLogs = [...this.logs];
+            return;
+        }
+        const searchLower = this.searchText.toLowerCase();
+        this.filteredLogs = this.logs.filter(log => {
+            const operation = log.operation.toLowerCase();
+            const user = log.user.toLowerCase();
+            return operation.includes(searchLower) || user.includes(searchLower);
+        });
+    }
+
+    // Keep the existing configuration methods
     public async setCurrentUserOnly(showCurrentUserOnly: boolean): Promise<void> {
         if (this.config.currentUserOnly === showCurrentUserOnly) {
             return; 
@@ -174,11 +250,11 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
             }
         }
         await this.refreshLogs(true); 
-        this._onDidChangeTreeData.fire(undefined);
+        this._notifyDataChange(false);
     }
 
     public getCurrentUserOnlySetting(): boolean {
-        return vscode.workspace.getConfiguration('salesforceLogViewer').get('currentUserOnly') ?? true;
+        return this.config.currentUserOnly;
     }
 
     public async setAutoRefresh(enabled: boolean): Promise<void> {
@@ -200,123 +276,8 @@ export class LogDataProvider implements vscode.TreeDataProvider<DeveloperLog>, v
         return this.config.autoRefresh;
     }
 
-    // --- TreeDataProvider Implementation ---
-
-    public getTreeItem(log: DeveloperLog): vscode.TreeItem {
-        const isHeader = log.id === 'header';
-        const label = this.getLabel(log);
-        const treeItem = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-        
-        treeItem.description = this.getDescription(log);
-
-        if (!isHeader) {
-            treeItem.tooltip = this.getTooltip(log);
-            treeItem.command = {
-                command: 'salesforce-log-viewer.openLog',
-                title: 'Open Log',
-                arguments: [log]
-            };
-            treeItem.iconPath = {
-                light: vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'light', 'log.svg'),
-                dark: vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'dark', 'log.svg')
-            };
-        }
-        return treeItem;
-    }
-
-    public getChildren(element?: DeveloperLog): vscode.ProviderResult<DeveloperLog[]> {
-        if (!element) {
-            const filterStatus = this.config.currentUserOnly ? '(Current User Only)' : '(All Users)';
-            const headerLog = new DeveloperLog({
-                Id: 'header', LogUser: { Name: 'USER' }, Operation: 'OPERATION',
-                StartTime: new Date().toISOString(), Status: 'STATUS', LogLength: 0,
-                DurationMilliseconds: 0, Location: '', Application: '', Request: ''
-            }, this.connection);
-            return [headerLog, ...this.filteredLogs];
-        }
-        return [];
-    }
-
-    public getParent(element: DeveloperLog): vscode.ProviderResult<DeveloperLog> {
-        return null;
-    }
-
-    // --- Formatting Helpers ---
-
-    private getLabel(log: DeveloperLog): string {
-        if (log.id === 'header') {
-            const userHeader = 'USER'.padEnd(this.userWidth);
-            return userHeader;
-        }
-        
-        // Handle data rows
-        const paddedUser = log.user.padEnd(this.userWidth);
-        return paddedUser;
-    }
-
-    private getDescription(log: DeveloperLog): string | undefined {
-        if (log.id === 'header') {
-            const timeHeader = 'TIME'.padEnd(this.timeWidth);
-            const statusHeader = 'STATUS'.padEnd(this.statusWidth);
-            const sizeHeader = 'SIZE'.padEnd(this.sizeWidth);
-            const operationHeader = 'OPERATION';
-
-            return `${timeHeader}     ${statusHeader}     ${sizeHeader}     ${operationHeader}`;
-        }
-        
-        // Handle data rows
-        const time = new Date(log.startTime).toLocaleTimeString('en-US', {
-            hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'
-        });
-        const size = `${(log.size / 1024).toFixed(1)}KB`;
-        const paddedTime = time.padEnd(this.timeWidth);
-        const paddedStatus = log.status.padEnd(this.statusWidth);
-        const paddedSize = size.padEnd(this.sizeWidth);
-        
-        let formattedOperation = log.operation;
-        if (log.operation.length > this.targetDataOperationLength) {
-            formattedOperation = log.operation.substring(0, this.targetDataOperationLength - 3) + '...';
-        }
-        
-        return `${paddedTime}    ${paddedStatus}    ${paddedSize}    ${formattedOperation}`;
-    }
-
-    private getTooltip(log: DeveloperLog): string {
-        if (log.id === 'header') return '';
-        const time = new Date(log.startTime).toLocaleString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-        return [
-            `User: ${log.user}`,
-            `Operation: ${log.operation}`,
-            `Time: ${time}`,
-            `Duration: ${log.durationMilliseconds}ms`,
-            `Application: ${log.application}`,
-            `Request: ${log.request}`
-        ].join('\n');
-    }
-
-    public async searchLogs(searchText: string): Promise<DeveloperLog[]> {
-        const searchLower = searchText.toLowerCase();
-        return this.logs.filter(log => 
-            log.operation.toLowerCase().includes(searchLower) ||
-            log.user.toLowerCase().includes(searchLower)
-        );
-    }
-
-    public setSearchFilter(text: string) {
-        this.searchText = text;
-        this._filterLogs();
-        this._onDidChangeTreeData.fire(undefined);
-    }
-
-    private _filterLogs() {
-        if (!this.searchText) {
-            this.filteredLogs = [...this.logs];
-            return;
-        }
-        const searchLower = this.searchText.toLowerCase();
-        this.filteredLogs = this.logs.filter(log => 
-            log.operation.toLowerCase().includes(searchLower) ||
-            log.user.toLowerCase().includes(searchLower)
-        );
+    private async getCurrentUserId(): Promise<string> {
+        const result = await this.connection.identity();
+        return result.user_id;
     }
 }

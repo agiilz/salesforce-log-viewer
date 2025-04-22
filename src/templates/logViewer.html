@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            background: var(--vscode-editor-background);
+            color: var(--vscode-editor-foreground);
+            height: 100vh;
+            overflow: hidden;
+            font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size);
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        .grid {
+            height: 100vh;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            background: var(--vscode-editor-background);
+        }
+        .grid-header {
+            font-weight: 600;
+            background: var(--vscode-editorGroupHeader-tabsBackground);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            padding: 1px 0;
+        }
+        .grid-header .grid-cell {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--vscode-editorGroupHeader-tabsBackground);
+            color: var(--vscode-sideBarTitle-foreground);
+            padding: 2px 6px;
+        }
+        .grid-header .grid-cell:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        .sort-indicator {
+            margin-left: 4px;
+            opacity: 0.7;
+            font-size: 0.8em;
+            color: var(--vscode-foreground);
+        }
+        .grid-body {
+            flex: 1;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: var(--vscode-scrollbarSlider-background) transparent;
+        }
+        .grid-body::-webkit-scrollbar {
+            width: 10px;
+        }
+        .grid-body::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .grid-body::-webkit-scrollbar-thumb {
+            background-color: var(--vscode-scrollbarSlider-background);
+            border-radius: 4px;
+        }
+        .grid-body::-webkit-scrollbar-thumb:hover {
+            background-color: var(--vscode-scrollbarSlider-hoverBackground);
+        }
+        .grid-row {
+            display: flex;
+            cursor: pointer;
+            min-height: 22px;
+            align-items: center;
+            position: relative;
+            color: var(--vscode-foreground);
+        }
+        .grid-row:hover {
+            background: var(--vscode-list-hoverBackground);
+        }
+        .grid-row:active {
+            background: var(--vscode-list-activeSelectionBackground);
+            color: var(--vscode-list-activeSelectionForeground);
+        }
+        .grid-cell {
+            padding: 2px 6px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            box-sizing: border-box;
+            position: relative;
+            flex-shrink: 0;
+            line-height: 18px;
+            min-width: min-content;
+        }
+        /* Remove horizontal borders between cells */
+        .grid-cell:not(:last-child) {
+            border-right: none;
+        }
+        /* Style for time, status, size, and duration columns */
+        [data-field="time"],
+        [data-field="status"],
+        [data-field="size"],
+        [data-field="duration"] {
+            color: var(--vscode-descriptionForeground);
+        }
+        /* Add log icon to the first column, but not in header */
+        .grid-body [data-field="user"] {
+            position: relative;
+            padding-left: 24px;  /* Space for icon */
+        }
+        
+        .grid-body [data-field="user"]::before {
+            content: "⬤";  /* Solid circle as icon */
+            position: absolute;
+            left: 6px;
+            opacity: 0.4;
+            font-size: 10px;
+            display: inline-block;
+            vertical-align: middle;
+        }
+
+        /* Align header with the text */
+        .grid-header [data-field="user"] {
+            padding-left: 24px;
+        }
+        .resize-handle {
+            position: absolute;
+            right: -3px;
+            top: 0;
+            bottom: 0;
+            width: 6px;
+            cursor: col-resize;
+            z-index: 2;
+            transition: background-color 0.2s;
+        }
+        .resize-handle:hover {
+            background-color: var(--vscode-focusBorder);
+        }
+        .resizing {
+            cursor: col-resize;
+        }
+        .resizing .grid-cell {
+            transition: none !important;
+        }
+        .resizing-active {
+            background-color: var(--vscode-focusBorder);
+        }
+        .empty-message {
+            padding: 10px;
+            text-align: center;
+            color: var(--vscode-descriptionForeground);
+        }
+    </style>
+</head>
+<body>
+    <div class="grid">
+        <div class="grid-row grid-header" id="grid-header">
+            <!--COLUMN_HEADERS-->
+        </div>
+        <div class="grid-body" id="grid-body"></div>
+    </div>
+    <script>
+        (function() {
+            const vscode = acquireVsCodeApi();
+            let lastData = [];
+            let columnWidths = new Map();
+            let resizingColumn = null;
+            let startX = 0;
+            let startWidth = 0;
+            let sortConfig = { field: null, ascending: true };
+            let activeResizeHandle = null;
+            let isAutoRefresh = false;
+
+            // Initialize state
+            try {
+                const state = vscode.getState() || {};
+                lastData = state.data || [];
+                columnWidths = new Map(state.columnWidths || []);
+                sortConfig = state.sortConfig || { field: null, ascending: true };
+            } catch (e) {
+                console.error('Failed to get state:', e);
+            }
+
+            function saveState() {
+                try {
+                    vscode.setState({
+                        data: lastData,
+                        columnWidths: Array.from(columnWidths.entries()),
+                        sortConfig
+                    });
+                } catch (e) {
+                    console.error('Failed to save state:', e);
+                }
+            }
+
+            function initializeResizeHandles() {
+                const headerCells = document.querySelectorAll('#grid-header .grid-cell');
+                headerCells.forEach(cell => {
+                    // Remove existing handlers and resize handles
+                    const existingHandle = cell.querySelector('.resize-handle');
+                    if (existingHandle) {
+                        existingHandle.remove();
+                    }
+                    
+                    // Create new resize handle
+                    const handle = document.createElement('div');
+                    handle.className = 'resize-handle';
+                    handle.addEventListener('mousedown', startResize);
+                    cell.appendChild(handle);
+
+                    // Remove existing click handlers
+                    cell.removeEventListener('click', cell.sortHandler);
+                    
+                    // Add new click handler for sorting
+                    cell.sortHandler = (e) => {
+                        if (e.target === cell) {
+                            const field = cell.dataset.field;
+                            sortByColumn(field);
+                        }
+                    };
+                    cell.addEventListener('click', cell.sortHandler);
+
+                    // Update sort indicator
+                    updateSortIndicator(cell);
+                });
+            }
+
+            function timeToComparableValue(timeStr) {
+                const [hours, minutes, seconds] = timeStr.split(':').map(Number);
+                // For chronological sorting, we need to handle the day boundary
+                // If we see times like 01:xx and 00:xx together with 23:xx,
+                // we assume 01:xx and 00:xx are more recent (from current day)
+                // and 23:xx is from previous day
+                let adjustedHours;
+                if (hours >= 20) { // Late hours (20:xx-23:xx)
+                    adjustedHours = hours - 24; // Make them negative to sort before early hours
+                } else {
+                    adjustedHours = hours; // Early hours (00:xx-19:xx) stay as is
+                }
+                return adjustedHours * 3600 + minutes * 60 + seconds;
+            }
+
+            function sortData(data, field, ascending) {
+                return [...data].sort((a, b) => {
+                    let aVal = a[field];
+                    let bVal = b[field];
+
+                    // Special handling for time column
+                    if (field === 'time') {
+                        aVal = timeToComparableValue(aVal);
+                        bVal = timeToComparableValue(bVal);
+                        // For time, descending means newest first
+                        return ascending ? bVal - aVal : aVal - bVal;
+                    }
+
+                    // Special handling for size and duration columns
+                    if (field === 'size' || field === 'duration') {
+                        aVal = parseFloat(aVal) || 0;
+                        bVal = parseFloat(bVal) || 0;
+                        return ascending ? aVal - bVal : bVal - aVal;
+                    }
+
+                    // Default string comparison
+                    aVal = String(aVal || '').toLowerCase();
+                    bVal = String(bVal || '').toLowerCase();
+                    return ascending ? 
+                        aVal.localeCompare(bVal) : 
+                        bVal.localeCompare(aVal);
+                });
+            }
+
+            function sortByColumn(field) {
+                console.log('Sorting by column:', field, 'Current config:', sortConfig);
+                
+                // Toggle ascending/descending or set initial sort
+                if (sortConfig.field === field) {
+                    sortConfig.ascending = !sortConfig.ascending;
+                } else {
+                    sortConfig.field = field;
+                    sortConfig.ascending = true;
+                }
+
+                console.log('New sort config:', sortConfig);
+
+                // Apply the sort
+                const sortedData = sortData(lastData, field, sortConfig.ascending);
+                updateGrid(sortedData);
+
+                // Update sort indicators
+                document.querySelectorAll('#grid-header .grid-cell').forEach(cell => {
+                    updateSortIndicator(cell);
+                });
+
+                // Save the state
+                saveState();
+            }
+
+            function updateSortIndicator(cell) {
+                // Remove existing indicator
+                const existingIndicator = cell.querySelector('.sort-indicator');
+                if (existingIndicator) {
+                    existingIndicator.remove();
+                }
+
+                const field = cell.dataset.field;
+                if (sortConfig.field === field) {
+                    const indicator = document.createElement('span');
+                    indicator.className = 'sort-indicator';
+                    indicator.textContent = sortConfig.ascending ? ' ↑' : ' ↓';
+                    cell.appendChild(indicator);
+                }
+            }
+
+            function startResize(e) {
+                e.preventDefault();
+                const handle = e.target;
+                const cell = handle.parentElement;
+                resizingColumn = cell;
+                startX = e.pageX;
+                startWidth = cell.offsetWidth;
+                activeResizeHandle = handle;
+                
+                document.body.classList.add('resizing');
+                handle.style.backgroundColor = 'var(--vscode-focusBorder)';
+
+                document.addEventListener('mousemove', resize);
+                document.addEventListener('mouseup', stopResize);
+            }
+
+            function resize(e) {
+                if (!resizingColumn) return;
+                
+                const width = Math.max(50, startWidth + (e.pageX - startX));
+                const columnIndex = Array.from(resizingColumn.parentElement.children).indexOf(resizingColumn);
+                
+                // Update header cell width
+                resizingColumn.style.width = `${width}px`;
+                
+                // Update all body cells in this column
+                const bodyCells = document.querySelectorAll(`#grid-body .grid-row > :nth-child(${columnIndex + 1})`);
+                bodyCells.forEach(cell => cell.style.width = `${width}px`);
+                
+                // Store the new width
+                const columnId = resizingColumn.dataset.field;
+                columnWidths.set(columnId, width);
+            }
+
+            function stopResize() {
+                if (!resizingColumn || !activeResizeHandle) return;
+                
+                document.body.classList.remove('resizing');
+                activeResizeHandle.style.backgroundColor = '';
+                resizingColumn = null;
+                activeResizeHandle = null;
+                
+                document.removeEventListener('mousemove', resize);
+                document.removeEventListener('mouseup', stopResize);
+                
+                saveState();
+            }
+
+            function updateGrid(data) {
+                lastData = data;
+                const gridBody = document.getElementById('grid-body');
+                if (!gridBody) {
+                    console.error('Grid body element not found');
+                    return;
+                }
+
+                gridBody.innerHTML = '';
+                
+                if (!data || data.length === 0) {
+                    const emptyRow = document.createElement('div');
+                    emptyRow.className = 'grid-row';
+                    emptyRow.style.justifyContent = 'center';
+                    emptyRow.style.padding = '20px';
+                    emptyRow.textContent = 'No logs found. Click refresh to fetch logs.';
+                    gridBody.appendChild(emptyRow);
+                    return;
+                }
+
+                // Always apply current sort if we have one
+                if (sortConfig.field) {
+                    data = sortData(data, sortConfig.field, sortConfig.ascending);
+                }
+                
+                data.forEach(row => {
+                    const rowDiv = document.createElement('div');
+                    rowDiv.className = 'grid-row';
+                    rowDiv.onclick = () => {
+                        vscode.postMessage({
+                            command: 'openLog',
+                            log: {
+                                id: row.id
+                            }
+                        });
+                    };
+                    
+                    <!--COLUMN_CELLS-->
+                    
+                    gridBody.appendChild(rowDiv);
+                });
+
+                // Apply stored column widths
+                if (columnWidths.size > 0) {
+                    document.querySelectorAll('.grid-cell').forEach(cell => {
+                        const width = columnWidths.get(cell.dataset.field);
+                        if (width) {
+                            cell.style.width = `${width}px`;
+                        }
+                    });
+                }
+            }
+
+            // Handle messages from the extension
+            window.addEventListener('message', event => {
+                const message = event.data;
+                
+                switch (message.type) {
+                    case 'updateData':
+                        updateGrid(message.data);
+                        initializeResizeHandles(); // Reinitialize handles after update
+                        break;
+                }
+            });
+
+            // Initial setup
+            document.addEventListener('DOMContentLoaded', () => {
+                // Signal that we're ready to receive data
+                vscode.postMessage({ command: 'ready' });
+                
+                // If we have last known data, show it
+                if (lastData.length > 0) {
+                    updateGrid(lastData);
+                }
+                
+                // Initialize the resize handles
+                initializeResizeHandles();
+            });
+        })();
+    </script>
+</body>
+</html> 

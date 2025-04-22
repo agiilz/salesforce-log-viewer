@@ -37,7 +37,9 @@ class LogViewer {
     }
     async showLog(log) {
         const logBody = await log.getBody();
-        const fileName = `${luxon_1.DateTime.fromJSDate(log.startTime).toFormat('MM-dd-yyyy_HH-mm-ss')}_${log.id}.log`;
+        const fileName = luxon_1.DateTime.fromJSDate(log.startTime)
+            .toFormat('MM-dd-yyyy_HH-mm-ss')
+            .replace(/\//g, '-') + '_' + log.id + '.log';
         return this.openLog(logBody, fileName);
     }
     async openLog(logBody, logFileName) {

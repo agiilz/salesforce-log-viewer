@@ -16,7 +16,9 @@ export class LogViewer {
 
     public async showLog(log: DeveloperLog): Promise<void> {
         const logBody = await log.getBody();
-        const fileName = `${DateTime.fromJSDate(log.startTime).toFormat('MM-dd-yyyy_HH-mm-ss')}_${log.id}.log`;
+        const fileName = DateTime.fromJSDate(log.startTime)
+            .toFormat('MM-dd-yyyy_HH-mm-ss')
+            .replace(/\//g, '-') + '_' + log.id + '.log';
         return this.openLog(logBody, fileName);
     }
 
