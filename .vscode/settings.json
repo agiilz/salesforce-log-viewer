@@ -1,0 +1,7 @@
+{
+    "salesforcedx-vscode-core.defaultusername": "adriagilsole420@agentforce.com",
+    "salesforceLogViewer.autoRefresh": true,
+    "salesforceLogViewer.refreshInterval": 3000,
+    "salesforceLogViewer.currentUserOnly": true,
+    "vlocity.sfdxUsername": "adriagilsole420@agentforce.com"
+} 

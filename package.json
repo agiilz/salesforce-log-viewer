@@ -1,0 +1,197 @@
+{
+  "name": "salesforce-log-viewer",
+  "displayName": "Salesforce Log Viewer",
+  "description": "View Salesforce logs in real-time",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "salesforce-log-viewer.refreshLogs",
+        "title": "Refresh Logs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "salesforce-log-viewer.toggleCurrentUserOnly",
+        "title": "Toggle Current User Only",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "salesforce-log-viewer.deleteAllLogs",
+        "title": "Delete All Logs",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "salesforce-log-viewer.toggleAutoRefresh",
+        "title": "Auto-refresh Logs",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "salesforce-log-viewer.showOptions",
+        "title": "Options",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "salesforce-log-viewer.showSearchBox",
+        "title": "Filter Logs",
+        "icon": "$(search)"
+      },
+      {
+        "command": "salesforce-log-viewer.showSearchPanel",
+        "title": "Search Logs",
+        "icon": "$(search)"
+      },
+      {
+        "command": "salesforce-log-viewer.collapseAll",
+        "when": "view == salesforceLogsView",
+        "group": "navigation@5",
+        "icon": {
+          "light": "./resources/light/collapse-all.svg",
+          "dark": "./resources/dark/collapse-all.svg"
+        },
+        "title": "Collapse All"
+      },
+      {
+        "command": "salesforce-log-viewer.expandAll",
+        "when": "view == salesforceLogsView",
+        "group": "navigation@6",
+        "icon": {
+          "light": "./resources/light/expand-all.svg",
+          "dark": "./resources/dark/expand-all.svg"
+        },
+        "title": "Expand All"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "salesforce-log-viewer",
+          "title": "Salesforce Log Viewer",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "salesforce-log-viewer": [
+        {
+          "id": "salesforceLogsView",
+          "name": "Salesforce Logs",
+          "contextualTitle": "Salesforce Logs"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "salesforceLogsView",
+        "contents": "No logs found.\n[Refresh Logs](command:salesforce-log-viewer.refreshLogs)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "salesforce-log-viewer.showSearchBox",
+          "when": "view == salesforceLogsView",
+          "group": "navigation@1",
+          "icon": {
+            "light": "resources/light/search.svg",
+            "dark": "resources/dark/search.svg"
+          }
+        },
+        {
+          "command": "salesforce-log-viewer.refreshLogs",
+          "when": "view == salesforceLogsView",
+          "group": "navigation@2",
+          "icon": {
+            "light": "resources/light/refresh.svg",
+            "dark": "resources/dark/refresh.svg"
+          }
+        },
+        {
+          "command": "salesforce-log-viewer.toggleCurrentUserOnly",
+          "when": "view == salesforceLogsView",
+          "group": "navigation@3",
+          "icon": {
+              "light": "resources/light/visibility.svg",
+              "dark": "resources/dark/visibility.svg"
+          }
+        },
+        {
+          "command": "salesforce-log-viewer.deleteAllLogs",
+          "when": "view == salesforceLogsView",
+          "group": "navigation@4",
+          "icon": {
+            "light": "resources/light/trash.svg",
+            "dark": "resources/dark/trash.svg"
+          }
+        },
+        {
+          "command": "salesforce-log-viewer.showOptions",
+          "when": "view == salesforceLogsView",
+          "group": "navigation@5",
+          "icon": {
+            "light": "resources/light/settings.svg",
+            "dark": "resources/dark/settings.svg"
+          }
+        }
+      ],
+      "view/item/context": [
+      ]
+    },
+    "configuration": {
+      "title": "Salesforce Log Viewer",
+      "properties": {
+        "salesforceLogViewer.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh logs"
+        },
+        "salesforceLogViewer.refreshInterval": {
+          "type": "number",
+          "default": 3000,
+          "description": "Refresh interval in milliseconds"
+        },
+        "salesforceLogViewer.currentUserOnly": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show only logs for the current user"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/glob": "^7.1.3",
+    "@types/jsforce": "^1.11.5",
+    "@types/luxon": "^3.6.2",
+    "@types/mocha": "^8.2.2",
+    "@types/node": "14.x",
+    "@types/vscode": "^1.60.0",
+    "eslint": "^7.27.0",
+    "glob": "^7.1.7",
+    "mocha": "^8.4.0",
+    "typescript": "^4.3.2",
+    "vscode-test": "^1.5.2"
+  },
+  "dependencies": {
+    "jsforce": "^1.11.0",
+    "luxon": "^3.0.0",
+    "fs-extra": "^11.2.0"
+  }
+}
