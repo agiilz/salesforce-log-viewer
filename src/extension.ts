@@ -192,57 +192,71 @@ async function getLogDataProvider(): Promise<LogDataProvider> {
 
 async function createConnection(): Promise<Connection> {
     try {
-        // Get the Salesforce extension's configuration
-        const sfConfig = vscode.workspace.getConfiguration('salesforcedx-vscode-core');
-        
-        // Try to get the connection info from the workspace state
-        const workspaceState = extensionContext.workspaceState;
-        const connectionInfo = workspaceState.get('sfdx:connection_info');
-
-        if (!connectionInfo) {
-            // If no connection info in workspace state, try to get it from the SFDX CLI
-            const { exec } = require('child_process');
-            const execPromise = (cmd: string) => new Promise<string>((resolve, reject) => {
-                exec(cmd, (error: Error | null, stdout: string) => {
-                    if (error) reject(error);
-                    else resolve(stdout);
-                });
-            });
-
-            // Get the default org username from VS Code settings
-            const defaultUsername = sfConfig.get('defaultUsernameOrAlias') || 'DevOrg';
+        // Try SF CLI first
+        try {
+            const { stdout: orgListOutputSF } = await executeCommand('sf org list --json');
+            const orgListSF = JSON.parse(orgListOutputSF);
             
-            try {
-                // Get org details using SFDX
-                const orgDetailsStr = await execPromise(`sfdx org:display -u "${defaultUsername}" --json`);
-                const orgDetails = JSON.parse(orgDetailsStr);
+            if (orgListSF.result && orgListSF.result.length > 0) {
+                const org = orgListSF.result.find((org: any) => org.isDefaultUsername) || orgListSF.result[0];
+                const { stdout: orgDetailsOutputSF } = await executeCommand(`sf org display --json -o ${org.alias || org.username}`);
+                const orgDetailsSF = JSON.parse(orgDetailsOutputSF);
 
-                if (!orgDetails.result || !orgDetails.result.accessToken || !orgDetails.result.instanceUrl) {
-                    throw new Error(`Unable to get connection details for org "${defaultUsername}". Please ensure you are authenticated.`);
+                if (orgDetailsSF.result) {
+                    return new Connection({
+                        instanceUrl: orgDetailsSF.result.instanceUrl,
+                        accessToken: orgDetailsSF.result.accessToken
+                    });
                 }
-
-                // Store the connection info in workspace state for future use
-                const connInfo = {
-                    instanceUrl: orgDetails.result.instanceUrl,
-                    accessToken: orgDetails.result.accessToken
-                };
-                
-                await workspaceState.update('sfdx:connection_info', connInfo);
-                return new Connection(connInfo);
-            } catch (cmdError: any) {
-                throw new Error(`Failed to get org details: ${cmdError.message}`);
             }
+        } catch (sfError) {
+            console.log('SF CLI attempt failed, trying SFDX...');
         }
 
-        // Use the stored connection info
-        return new Connection(connectionInfo);
+        // Fallback to SFDX
+        const { stdout: orgListOutput } = await executeCommand('sfdx force:org:list --json');
+        const orgList = JSON.parse(orgListOutput);
+        
+        if (!orgList.result || (!orgList.result.nonScratchOrgs?.length && !orgList.result.scratchOrgs?.length)) {
+            throw new Error('No connected orgs found. Please authenticate using either:\n\nsf org login web\n- or -\nsfdx force:auth:web:login');
+        }
+
+        // Try to find default org or use first available
+        const nonScratchOrgs = orgList.result.nonScratchOrgs || [];
+        const scratchOrgs = orgList.result.scratchOrgs || [];
+        const allOrgs = [...nonScratchOrgs, ...scratchOrgs];
+        const defaultOrg = allOrgs.find(org => org.isDefaultUsername) || allOrgs[0];
+
+        // Get org details using SFDX
+        const { stdout: orgDetailsOutput } = await executeCommand(`sfdx force:org:display --json -u ${defaultOrg.username}`);
+        const orgDetails = JSON.parse(orgDetailsOutput);
+
+        if (!orgDetails.result) {
+            throw new Error('Failed to get org details. Please make sure you are connected to your org.');
+        }
+
+        return new Connection({
+            instanceUrl: orgDetails.result.instanceUrl,
+            accessToken: orgDetails.result.accessToken
+        });
     } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error occurred';
         vscode.window.showErrorMessage(`Failed to connect to Salesforce: ${errorMessage}`);
         throw error;
     }
 }
-
+async function executeCommand(command: string): Promise<{ stdout: string, stderr: string }> {
+    const { exec } = require('child_process');
+    return new Promise((resolve, reject) => {
+        exec(command, (error: Error | null, stdout: string, stderr: string) => {
+            if (error) {
+                reject(error);
+            } else {
+                resolve({ stdout, stderr });
+            }
+        });
+    });
+}
 async function refreshLogs() {
     try {
         const provider = await getLogDataProvider();
